@@ -1,4 +1,4 @@
-# EP32-CRT: ESP32 Composite Video Clock
+# ESP32-CRT: ESP32 Composite Video Clock
 
 A retro-style analog clock application that generates composite video output directly from an ESP32 microcontroller, displaying time via a CRT television screen.
 
