@@ -85,7 +85,7 @@ static uint32_t g_pixel_calls_count;
 // No extra voltage divider on DAC output
 #define DAC_LEVEL_SYNC 0 // sync pulse level 0V
 #define DAC_LEVEL_BLACK 23 // black level 0.3V
-#define DAC_LEVEL_WHITE 77 //white level 1V
+#define DAC_LEVEL_WHITE 77//white level 1V
 
 // PAL
 #define PAL_LINE_DURATION_US 64

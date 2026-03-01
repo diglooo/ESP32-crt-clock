@@ -1,6 +1,7 @@
 #include "graphics.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 uint8_t* frame_buffer;
 uint16_t width;
@@ -165,5 +166,62 @@ void draw_vector_string(int16_t x, int16_t y, const char* text, float scale, flo
 
         text++;
     }
+}
+
+// Conway's Game of Life step implementation for an 8-bit greyscale buffer.
+// Alive cells are any non-zero input value and will be set to 255 in output.
+void game_of_life_step(uint8_t* buffer, uint16_t w, uint16_t h)
+{
+    if (!buffer || w == 0 || h == 0)
+        return;
+
+    size_t sz = (size_t)w * (size_t)h;
+    uint8_t* tmp = (uint8_t*)malloc(sz);
+    if (!tmp)
+        return; // allocation failed, do nothing
+
+    // Copy current state to temporary buffer
+    for (size_t i = 0; i < sz; ++i)
+        tmp[i] = buffer[i];
+
+    auto is_alive = [&](int x, int y)->int {
+        if (x < 0 || y < 0 || x >= (int)w || y >= (int)h)
+            return 0;
+        return tmp[y * w + x] ? 1 : 0;
+    };
+
+    for (int y = 0; y < (int)h; ++y)
+    {
+        for (int x = 0; x < (int)w; ++x)
+        {
+            int n = 0;
+            // count 8 neighbors
+            n += is_alive(x-1, y-1);
+            n += is_alive(x,   y-1);
+            n += is_alive(x+1, y-1);
+            n += is_alive(x-1, y  );
+            n += is_alive(x+1, y  );
+            n += is_alive(x-1, y+1);
+            n += is_alive(x,   y+1);
+            n += is_alive(x+1, y+1);
+
+            int cur = is_alive(x, y);
+            uint8_t out = 0;
+            if (cur)
+            {
+                // survive with 2 or 3 neighbors
+                out = (n == 2 || n == 3) ? 255 : 0;
+            }
+            else
+            {
+                // birth with exactly 3 neighbors
+                out = (n == 3) ? 255 : 0;
+            }
+
+            buffer[y * w + x] = out;
+        }
+    }
+
+    free(tmp);
 }
 

@@ -21,4 +21,8 @@ void draw_number(int16_t x, int16_t y, int32_t number, uint8_t scale, uint8_t va
 void draw_vector_character(int16_t x, int16_t y, const VectorCharacter* character, float scale, float vert_scale, uint8_t value);
 void draw_vector_string(int16_t x, int16_t y, const char* text, float scale, float vert_scale, uint8_t value);
 
+// Run one step of Conway's Game of Life on an 8-bit greyscale buffer.
+// Alive cells are any non-zero value and will be written as 255; dead as 0.
+void game_of_life_step(uint8_t* buffer, uint16_t w, uint16_t h);
+
 #endif // GRAPHICS_H

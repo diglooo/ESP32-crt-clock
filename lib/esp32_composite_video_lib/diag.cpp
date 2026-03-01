@@ -169,7 +169,7 @@ void video_test_ntsc(VIDEO_TEST_TYPE test)
     {
     case VIDEO_TEST_CHECKERS:
         ESP_LOGI(TAG, "NTSC Display test checkers");
-        video_init(320, 240, FB_FORMAT_GREY_8BPP, VIDEO_MODE_NTSC, false);
+        video_init(320, 240, FB_FORMAT_GREY_8BPP, VIDEO_MODE_PAL, false);
         display_test_image_checkers();
         break;
 
@@ -181,7 +181,7 @@ void video_test_ntsc(VIDEO_TEST_TYPE test)
 
     case VIDEO_TEST_WHITE:
         ESP_LOGI(TAG, "NTSC Display test white");
-        video_init(320, 240, FB_FORMAT_GREY_8BPP, VIDEO_MODE_NTSC, false);
+        video_init(320, 240, FB_FORMAT_GREY_8BPP, VIDEO_MODE_PAL, false);
         display_test_image_white();
         break;
     }
