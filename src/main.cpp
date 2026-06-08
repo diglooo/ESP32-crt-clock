@@ -2,6 +2,7 @@
 #include "video.h"
 #include "graphics.h"
 #include "framebuffer_gfx.h"
+#include <Preferences.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ESP32Time.h>
@@ -12,7 +13,18 @@
 #include <Fonts/Picopixel.h>
 #include <JSON_Decoder.h>
 #include <OpenWeather.h>
+#include <Radar-rd-03d.h>
 #include "secrets.h"
+#include "BoschHomeConnect.h"
+
+
+RadarRD03D radar;
+unsigned long lastPersonDetectionMillis = 0;
+bool person_detected_filtered = false;
+unsigned long personDetectedSince   = 0; // when raw signal last went true
+unsigned long personAbsentSince     = 0; // when raw signal last went false
+unsigned long lastScreenDrawMillis = 1100;
+#define PIN_CRT_PWR_CTRL  4
 
 int16_t frame_cnt = 0;
 // NTP server details
@@ -25,7 +37,12 @@ time_t last_local_minutes = 0, actual_local_minutes = 0;
 struct tm local_time_tm;// offset in seconds
 
 uint8_t iswifiConnected = 0, iswifiConnectedLast = 0, iswifiConnectedOSR = 0;
-uint32_t lastwificheckmillis = 10000+1, lastWeatherCheckMillis=30*60000+1;
+unsigned long  lastwificheckmillis = 10000+1, lastWeatherCheckMillis=30*60000+1;
+unsigned long  last_HC_SSE_poll_time=0;
+
+//HC variables
+int remainingTimeSec = 0;
+char *dishwasherStateStr = (char *)malloc(64);
 
 U8G2_FOR_ADAFRUIT_GFX gfx_renderer;
 OW_Weather ow; // Weather forecast library instance
@@ -45,7 +62,6 @@ static const char* dayNames[] = {
 
 // Framebuffer GFX instance pointer
 Framebuffer_GFX *fbGfx = nullptr;
-
 
 uint8_t initWiFi()
 {
@@ -70,16 +86,21 @@ void ntp_sync_cb(struct timeval* t) {
 
 void setNTPTime(const char *_posixTimeZone, const char *_ntpServer)
 {
-  // make NTP request
   Serial.println("NTP begin");
-  sntp_set_sync_interval(24 * 60 * 60 * 1000UL);
-  //sntp_set_sync_interval(30 * 1000UL); 
-  sntp_set_time_sync_notification_cb(ntp_sync_cb);
-  esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-  esp_sntp_setservername(0, _ntpServer);
-  esp_sntp_init();
   setenv("TZ", _posixTimeZone, 1);
-  tzset(); 
+  tzset();
+  if (!esp_sntp_enabled())
+  {
+    sntp_set_sync_interval(24 * 60 * 60 * 1000UL);
+    sntp_set_time_sync_notification_cb(ntp_sync_cb);
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, _ntpServer);
+    esp_sntp_init();
+  }
+  else
+  {
+    sntp_restart();
+  }
 }
 
 // Convert unix timestamp to day of week string
@@ -105,30 +126,27 @@ void getForecast( int8_t * _rainyDays)
     _rainyDays[i]=-1;
   }
   int day_index = 0;
-  int last_day=-1;
 
   if (forecast)
   {
-    for (int i = 0; i < (MAX_DAYS * 24/MAX_HOURS); i++)
+    for (int d = 0; d < MAX_DAYS; d++)
     {
-      Serial.print("dow  : "); Serial.println(dayNames[getDayOfWeek(forecast->dt[i])]);
-      Serial.print("main : "); Serial.println((forecast->main[i]));
-      Serial.println();
-
-      //gat day of current forecast
-      int forecastDay=getDayOfWeek(forecast->dt[i]);
-
-      //if forecast is rain
-      if(forecast->main[i] == "Rain")
+      int rainSlots = 0;
+      int forecastDay = -1;
+      for (int s = 0; s < 8; s++)
       {
-        //if last set rainy day is different than current day
-        if(last_day != forecastDay)
-        {
-          //set next rainy day
-          _rainyDays[day_index]=forecastDay;
-          last_day=forecastDay;
-          day_index++;
-        }
+        int i = d * 8 + s;
+        forecastDay = getDayOfWeek(forecast->dt[i]);
+        Serial.print("day      : "); Serial.println(dayNames[forecastDay]);
+        Serial.print("main fore: "); Serial.println(forecast->main[i]);
+        if (forecast->main[i] == "Rain")
+          rainSlots++;
+      }
+      Serial.printf("Day %s: %d/8 rainy slots\n", dayNames[forecastDay], rainSlots);
+      if (rainSlots > 4)
+      {
+        _rainyDays[day_index] = forecastDay;
+        day_index++;
       }
     }
   }
@@ -136,13 +154,32 @@ void getForecast( int8_t * _rainyDays)
   delete forecast;
 }
 
-void network_task()
+static unsigned long wifiReconnectMillis = 0;
+
+void network_func()
 {
   unsigned long currentMillis = millis();
-  if(currentMillis-lastwificheckmillis >10000)
+  if(currentMillis-lastwificheckmillis >1000)
   {
     iswifiConnected=WiFi.status() == WL_CONNECTED;
     lastwificheckmillis=currentMillis;
+    if(iswifiConnected)
+    {
+      wifiReconnectMillis = 0;
+      Serial.println("Wi-Fi connected!");
+    }
+    else
+    {
+      Serial.println("Wi-Fi not connected");
+      // Full disconnect+reconnect with 10s backoff to clear ASSOC_COMEBACK rejections
+      if (wifiReconnectMillis == 0 || currentMillis - wifiReconnectMillis > 10000)
+      {
+        wifiReconnectMillis = currentMillis;
+        WiFi.disconnect(false);
+        delay(500);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+      }
+    }
   }
 
   if(currentMillis - lastWeatherCheckMillis > 30*60000)
@@ -152,6 +189,7 @@ void network_task()
       lastWeatherCheckMillis = currentMillis;
       getForecast(rainyDays);
     }
+
   }
 
   iswifiConnectedOSR=iswifiConnected & !iswifiConnectedLast;
@@ -160,6 +198,21 @@ void network_task()
   if (iswifiConnectedOSR)
   {
       setNTPTime(posixTimeZone, ntpServer);
+
+        // try to connect to BOSCH API and get haId of the appliance
+      if (hc_get_ha_id(OA2Ptr) != HTTP_CODE_OK)
+      {
+        // if it fails, try to reauth
+        if (!oauth_device_flow(OA2Ptr))
+        {
+          Serial.println("OAuth2 Error");
+        }
+        else
+        {
+          Serial.println("OAuth2 OK!");
+          SSEStream = hc_setup_server_event(&httpMonitorRequest, OA2Ptr, BSHhaIdDiswasher);
+        }
+      }
   }
 
   if (millis() - lastTimeCheck > 1000)
@@ -169,10 +222,58 @@ void network_task()
   }
 }
 
+int isProgramActive=0;
+//polling is internally done every 1000 ms
+void homeconnect_poll_func()
+{
+  unsigned long currentMillis = millis();
 
-unsigned long lastScreenDrawMillis = 1100;
+  if(currentMillis - last_HC_SSE_poll_time > 5000)
+  {
+    last_HC_SSE_poll_time=currentMillis;
+    if (hc_poll_server_event(SSEStream, &ssEventContent))
+    {
+      Serial.println(ssEventContent.eventName);
+      Serial.println(ssEventContent.eventData);
+      if (ssEventContent.eventName.indexOf("NOTIFY") >= 0)
+      {
+        // event type: NOTIFY
+        DeserializationError error = deserializeJson(responseJsonDoc, ssEventContent.eventData);
+        if (!error)
+        {
+          if (responseJsonDoc["items"][0]["key"].as<String>().indexOf("RemainingProgramTime") >= 0)
+          {
+            long remainingTimeSec = responseJsonDoc["items"][0]["value"].as<int32_t>();
+            isProgramActive = 1;
+          }
+          if (responseJsonDoc["items"][0]["key"].as<String>().indexOf("ProgramFinished") >= 0)
+          {
+            isProgramActive = 0;
+          }
+          if (responseJsonDoc["items"][0]["key"].as<String>().indexOf("ProgramAborted") >= 0)
+          {
+            isProgramActive = 0;
+          }
+        }
+      }
+    }
 
-void rendering_task()
+    if (isProgramActive)
+    {
+      time_t ETA_timestamp = time(nullptr) + remainingTimeSec;
+      struct tm ETA_datetime = *localtime(&ETA_timestamp);
+      sprintf(dishwasherStateStr, "Fine progr: %02d:%02d", ETA_datetime.tm_hour, ETA_datetime.tm_min);
+      Serial.println(dishwasherStateStr);
+    }
+    else
+    {
+      Serial.println("No active program");
+      sprintf(dishwasherStateStr, "Nessun programma.");
+    }
+  }
+}
+
+void rendering_func()
 {
   char strbuf[16];
   int dc=0;
@@ -201,7 +302,6 @@ void rendering_task()
         if(rainyDays[i] != -1) dc++;
       }
 
-    
       if(dc>0) fbGfx->setCursor(20,90);
       else fbGfx->setCursor(20,130);
       fbGfx->setTextSize(16); // Scale up the text size
@@ -227,34 +327,79 @@ void rendering_task()
         fbGfx->print("No Wi-Fi :(");
       }
 
+
+      fbGfx->setCursor(20, 220);
+      fbGfx->setTextSize(2); // Normal text size for status
+      fbGfx->print(dishwasherStateStr);
+
   }
   else
   {
     //game_of_life_step(frame_buffer, width, height); // Run one step of Game of Life on the frame buffer for a cool screensaver effect when not updating time/weather
   }
-  
 }
 
-// FreeRTOS task wrapper that repeatedly calls network_loop()
-// It has a larger stack so that network_loop and any secure client
-// objects do not overflow the task stack.
 void guiTask(void *pvParameters)
 {
     (void) pvParameters;
     for (;;)
     {
-        rendering_task();
+        rendering_func();
         // small delay to avoid hogging CPU
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+void radarTask(void *pvParameters)
+{
+    pinMode(PIN_CRT_PWR_CTRL, OUTPUT);
+    digitalWrite(PIN_CRT_PWR_CTRL, HIGH); // power on CRT
+    radar.begin(Serial2, 17, 16); // pass any HardwareSerial port and RX/TX pins
+    Serial.println("Radar initialized!");
+    (void) pvParameters;
+    for (;;)
+    {
+        radar.poll();
+        if(millis() - lastPersonDetectionMillis > 100)
+        {
+          lastPersonDetectionMillis = millis();
+          unsigned long now = millis();
+          if (radar.person_detected) {
+            personAbsentSince = 0;
+            if (personDetectedSince == 0) personDetectedSince = now;
+            if (!person_detected_filtered && (now - personDetectedSince >= 500))
+              person_detected_filtered = true;
+          } else {
+            personDetectedSince = 0;
+            if (personAbsentSince == 0) personAbsentSince = now;
+            if (person_detected_filtered && (now - personAbsentSince >= 5000))
+              person_detected_filtered = false;
+          }
+        }
+        digitalWrite(PIN_CRT_PWR_CTRL, person_detected_filtered); // power on CRT if person detected, otherwise power off    
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
 void setup()
 {
+  delay(3000);
   Serial.begin(115200);
   video_init(320, 240, FB_FORMAT_GREY_8BPP, VIDEO_MODE_PAL, false);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+
+  // retrieve tokens from non-volatile storage
+  preferences.begin("tokens", false);
+  OA2Ptr->set_tokens(preferences.getString("access_token", "-"), preferences.getString("refresh_token", "-"));
+  preferences.end();
+
+  // setup OAuth2 object
+  OA2Ptr->set_server_urls(authorization_url, token_generator_url);
+  OA2Ptr->set_secrets(CLIENT_ID, CLIENT_SECRET);
+
 
   frame_buffer = video_get_frame_buffer_address();
   width = video_get_width();
@@ -271,20 +416,35 @@ void setup()
     gfx_renderer.setForegroundColor(255);       // set color for the font (in this case white)
   }
 
-  // start network_loop in its own task pinned to core 0
-    // increased stack size to handle WiFiClientSecure allocations
-    xTaskCreatePinnedToCore(
+  xTaskCreatePinnedToCore(
       guiTask,      // task function
       "NetworkTask",   // name
       4096,             // stack size in bytes
       NULL,             // parameters
       1,                // priority
       NULL,             // handle
-      1);               // run on core 0
+      1);               // run on core 1
+
+  /*
+  xTaskCreatePinnedToCore(
+      radarTask,      // task function
+      "RadarTask",   // name
+      4096,             // stack size in bytes
+      NULL,             // parameters
+      1,                // priority
+      NULL,             // handle
+      1);               // run on core 1
+  */
+
 }
 
 void loop()
 {
- network_task();
+  network_func();
+
+  if(iswifiConnected)
+  {
+    homeconnect_poll_func();
+  }
 }
 
